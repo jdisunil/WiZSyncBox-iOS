@@ -1,0 +1,75 @@
+name: iOS unsigned device IPA (for personal sideloading)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'App/**'
+      - 'Core/**'
+      - 'Services/**'
+      - 'project.yml'
+      - '.github/workflows/ios-unsigned-ipa.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unsigned-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build unsigned app for physical iPhone (arm64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project WiZSyncBox.xcodeproj \
+            -scheme WiZSyncBox \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Validate and package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/WiZSyncBox.app"
+          test -d "$APP"
+          test -f "$APP/WiZSyncBox"
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")
+          test "$BUNDLE_ID" = 'com.wizsyncbox.ios'
+          file "$APP/WiZSyncBox"
+          xcrun lipo -archs "$APP/WiZSyncBox" | grep -qw arm64
+          mkdir -p "$RUNNER_TEMP/ipa/Payload" "$GITHUB_WORKSPACE/dist"
+          ditto "$APP" "$RUNNER_TEMP/ipa/Payload/WiZSyncBox.app"
+          (cd "$RUNNER_TEMP/ipa" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/dist/WiZSyncBox-unsigned.ipa" Payload)
+          unzip -t "$GITHUB_WORKSPACE/dist/WiZSyncBox-unsigned.ipa" | tail -1
+          shasum -a 256 "$GITHUB_WORKSPACE/dist/WiZSyncBox-unsigned.ipa" > "$GITHUB_WORKSPACE/dist/SHA256SUMS.txt"
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WiZSyncBox-unsigned-iphoneos
+          path: |
+            dist/WiZSyncBox-unsigned.ipa
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
